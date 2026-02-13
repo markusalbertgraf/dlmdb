@@ -13177,6 +13177,129 @@ mdb_cursor_list_dup_regular(MDB_cursor *mc, MDB_page *mp)
 	return MDB_SUCCESS;
 }
 
+/** Collect all dup values from a sub-database (F_SUBDATA) by traversing
+ *  the nested B-tree.  For LEAF2 pages the returned MDB_val pointers
+ *  reference the memory-mapped pages directly.  For regular (possibly
+ *  prefix-compressed) pages the values are copied into the leaf cache
+ *  buffer so that they remain valid after cursor movement. */
+static int
+mdb_cursor_list_dup_subdb(MDB_cursor *mc, const MDB_val **values,
+	mdb_size_t *countp)
+{
+	MDB_cursor *mx = &mc->mc_xcursor->mx_cursor;
+	mdb_size_t total = mc->mc_xcursor->mx_db.md_entries;
+	MDB_cursor_leaf_cache *cache = &mx->mc_leaf_cache;
+	MDB_val val;
+	int rc;
+	mdb_size_t idx;
+	int is_leaf2;
+
+	/* Save nested cursor state so we can restore after traversal. */
+	indx_t   ki_save[CURSOR_STACK];
+	MDB_page *pg_save[CURSOR_STACK];
+	unsigned int top_save   = mx->mc_top;
+	unsigned int snum_save  = mx->mc_snum;
+	unsigned int flags_save = mx->mc_flags;
+	unsigned int j;
+
+	if (total == 0) {
+		*countp = 0;
+		*values = NULL;
+		return MDB_SUCCESS;
+	}
+
+	for (j = 0; j < snum_save && j < CURSOR_STACK; j++) {
+		ki_save[j] = mx->mc_ki[j];
+		pg_save[j] = mx->mc_pg[j];
+	}
+
+	mdb_cursor_leaf_cache_reset(cache);
+	rc = mdb_cursor_leaf_cache_ensure_vals(cache, (unsigned int)total);
+	if (rc != MDB_SUCCESS)
+		goto restore;
+
+	/* Position at the first entry of the sub-database. */
+	rc = mdb_cursor_first(mx, &val, NULL);
+	if (rc != MDB_SUCCESS)
+		goto restore;
+
+	is_leaf2 = IS_LEAF2(mx->mc_pg[mx->mc_top]);
+
+	if (is_leaf2) {
+		/* LEAF2 / DUPFIXED: data resides directly in memory-mapped
+		 * pages, so the pointers are stable for the txn lifetime. */
+		cache->decoded_vals[0] = val;
+		for (idx = 1; idx < total; idx++) {
+			rc = mdb_cursor_next(mx, &val, NULL, MDB_NEXT);
+			if (rc != MDB_SUCCESS) {
+				if (rc == MDB_NOTFOUND)
+					break;
+				goto restore;
+			}
+			cache->decoded_vals[idx] = val;
+		}
+	} else {
+		/* Non-LEAF2: values may be prefix-decoded into temporary
+		 * buffers, so copy every value into stable cache storage. */
+		size_t buf_used = 0;
+
+		rc = mdb_cursor_leaf_cache_reserve_buf(cache, total * 64);
+		if (rc != MDB_SUCCESS)
+			goto restore;
+
+		for (idx = 0; ; ) {
+			size_t need = buf_used + val.mv_size;
+			if (need > cache->decoded_buf_size) {
+				rc = mdb_cursor_leaf_cache_reserve_buf(cache, need);
+				if (rc != MDB_SUCCESS)
+					goto restore;
+			}
+			memcpy(cache->decoded_buf + buf_used, val.mv_data,
+				val.mv_size);
+			cache->decoded_vals[idx].mv_size = val.mv_size;
+			buf_used += val.mv_size;
+			idx++;
+
+			if (idx >= total)
+				break;
+			rc = mdb_cursor_next(mx, &val, NULL, MDB_NEXT);
+			if (rc != MDB_SUCCESS) {
+				if (rc == MDB_NOTFOUND)
+					break;
+				goto restore;
+			}
+		}
+
+		/* The buffer address is now final (no more reserve_buf calls).
+		 * Convert accumulated sizes into data pointers. */
+		{
+			size_t offset = 0;
+			mdb_size_t k;
+			for (k = 0; k < idx; k++) {
+				cache->decoded_vals[k].mv_data =
+					cache->decoded_buf + offset;
+				offset += cache->decoded_vals[k].mv_size;
+			}
+		}
+	}
+
+	cache->decoded_count = (unsigned int)idx;
+	*countp = idx;
+	*values = cache->decoded_vals;
+	rc = MDB_SUCCESS;
+
+restore:
+	for (j = 0; j < snum_save && j < CURSOR_STACK; j++) {
+		mx->mc_ki[j] = ki_save[j];
+		mx->mc_pg[j] = pg_save[j];
+	}
+	mx->mc_top  = top_save;
+	mx->mc_snum = snum_save;
+	mx->mc_flags = flags_save;
+
+	return rc;
+}
+
 int
 mdb_cursor_list_dup(MDB_cursor *mc, const MDB_val **values, mdb_size_t *countp)
 {
@@ -13208,7 +13331,7 @@ mdb_cursor_list_dup(MDB_cursor *mc, const MDB_val **values, mdb_size_t *countp)
 	if (!F_ISSET(leaf->mn_flags, F_DUPDATA))
 		return MDB_NOTFOUND;
 	if (F_ISSET(leaf->mn_flags, F_SUBDATA))
-		return MDB_INCOMPATIBLE;
+		return mdb_cursor_list_dup_subdb(mc, values, countp);
 
 	mx = &mc->mc_xcursor->mx_cursor;
 	if (!(mx->mc_flags & C_INITIALIZED))
