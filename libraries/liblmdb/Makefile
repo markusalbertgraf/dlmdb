@@ -43,7 +43,7 @@ SHLIBS	= libdlmdb$(SOEXT)
 ILIBS	= $(LIBS) $(SHLIBS)
 LINKLIBS	= $(LIBS)
 IPROGS	= dlmdb_stat dlmdb_copy dlmdb_dump dlmdb_load dlmdb_drop
-IDOCS	= dlmdb_stat.1 dlmdb_copy.1 dlmdb_dump.1 dlmdb_load.1 dlmdb_drop.1
+IDOCS	= mdb_stat.1 mdb_copy.1 mdb_dump.1 mdb_load.1 mdb_drop.1
 PROGS	= $(IPROGS) mtest mtest2 mtest3 mtest4 mtest5 mtest_count mtest_prefix count_bench compress_bench sample_bench dup_iter_bench
 all:	$(ILIBS) $(PROGS)
 
@@ -55,7 +55,7 @@ install: $(ILIBS) $(IPROGS) $(IHDRS)
 	for f in $(IPROGS); do cp $$f $(DESTDIR)$(bindir); done
 	for f in $(ILIBS); do cp $$f $(DESTDIR)$(libdir); done
 	for f in $(IHDRS); do cp $$f $(DESTDIR)$(includedir); done
-	for f in $(IDOCS); do cp $$f $(DESTDIR)$(mandir)/man1; done
+	for f in $(IDOCS); do cp $$f $(DESTDIR)$(mandir)/man1/dl$$f; done
 
 clean:
 	rm -rf $(PROGS) *.[ao] *.[ls]o *~ testdb
